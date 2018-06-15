@@ -4,3 +4,9 @@ version = "0.1.0"
 authors = ["Richard Palethorpe <rpalethorpe@suse.com>"]
 
 [dependencies]
+hyper = "0.12"
+serde = "1"
+serde_derive = "1"
+serde_json = "1"
+futures = "0.1.21"
+failure = "0.1.1"
