@@ -1,0 +1,6 @@
+[package]
+name = "openqa"
+version = "0.1.0"
+authors = ["Richard Palethorpe <rpalethorpe@suse.com>"]
+
+[dependencies]
