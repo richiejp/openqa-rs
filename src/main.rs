@@ -1,3 +1,5 @@
+extern crate http;
+extern crate bytes;
 extern crate hyper;
 extern crate hyper_tls;
 extern crate serde;
@@ -8,8 +10,11 @@ extern crate futures;
 extern crate failure;
 extern crate crypto;
 extern crate time;
+extern crate urlencoding;
 
-use hyper::{Client, Body, Chunk, Uri};
+use http::uri::{Uri, Authority, Scheme, Parts, PathAndQuery};
+use bytes::Bytes;
+use hyper::{Client, Body, Chunk};
 use hyper::client::HttpConnector;
 use hyper::rt::{self, Future, Stream};
 use hyper_tls::HttpsConnector;
@@ -20,6 +25,7 @@ use crypto::hmac::Hmac;
 use crypto::sha1::Sha1;
 use crypto::mac::MacResult;
 use time::get_time;
+use urlencoding as urlenc;
 
 #[derive(Serialize, Deserialize)]
 struct Setting {
@@ -43,8 +49,62 @@ struct TestSuites {
 
 type MyClient = Client<HttpsConnector<HttpConnector>>;
 
-const BASEURL: &str = "https://openqa.suse.de/api/v1/";
-const KEY: &str = "1234567890ABCDEF"
+struct UserAgent {
+    client: MyClient,
+    parts: Parts,
+    key: String,
+    secret: String,
+}
+
+const KEY: &str = "1234567890ABCDEF";
+const API: &str = "/api/v1/";
+
+impl Default for UserAgent {
+    fn default() -> UserAgent {
+        let mut https = HttpsConnector::new(1).unwrap();
+        let client = Client::builder().build::<_, Body>(https);
+
+        let parts = Parts::default();
+        parts.scheme = Some(Scheme::HTTPS);
+        parts.authority = Some("openqa.suse.de".parse().unwrap());
+
+        UserAgent {
+            client,
+            parts,
+            key: KEY.clone(),
+            secret: KEY.clone(),
+        }
+    }
+}
+
+impl UserAgent {
+    fn urlb(&self, path: &str) -> Vec<u8> {
+        let bytes = API.as_bytes().owned();
+        bytes.extend_from_slice(path.as_bytes())
+    }
+
+    pub fn url(&self, path: &str) -> Uri {
+        let parts = self.parts.clone();
+        let bytes = Bytes::from(self.urlb(path));
+        parts.path_and_query = Some(PathAndQuery::from_shared(bytes).unwrap());
+        Uri::from_parts(parts)
+    }
+
+    pub fn url_query(&self, path: &str, pairs: Vec<(&str, &str)>) -> Uri {
+        let parts = self.parts.clone();
+        let bytes = urlb(path);
+        bytes.push(b'?');
+        for (k, v) in &pairs {
+            bytes.extend_from_slice(urlenc::encode(k).as_bytes());
+            bytes.push(b'=');
+            bytes.extend_from_slice(urlenc::encode(v).as_bytes());
+        }
+
+        let bytes = Bytes::from(bytes);
+        parts.path_and_query = Some(PathAndQuery::from_shared(bytes).unwrap());
+        Uri::from_parts(parts)
+    }
+}
 
 fn get(c: &MyClient, url: Uri) -> impl Future<Item=Chunk, Error=Error> {
     c.get(url).and_then(|res| {
@@ -83,40 +143,89 @@ fn post(c: &MyClient, url: Uri, body: Body) -> impl Future<Item=Request, Error=E
     hdrs.insert("X-API-Hash", hash(&url, &t));
     *req.uri_mut() = url;
 
-    c.request(req).map_err(|e| Error::from(e))
+    c.request(req).and_then(|res| {
+        println!("POST -> {}", res.status());
+        res.into_body().concat2()
+    }).map_err(|e| Error::from(e))
+}
+
+fn create_uefi_setting(key: &str, template: &str) -> Setting {
+    Setting {
+        key: key.owned()
+        value: format!("{}-uefi.qcow2", template.trim_right_matches(".qcow2")),
+    }
+}
+
+fn read_yn() -> bool {
+    let mut buf: &[u8:1];
+    let mut sin = std::io::stdin().lock();
+
+    sin.read_exact(buf).unwrap();
+    println!("");
+    buf == b"y"
 }
 
 fn run() -> impl Future<Item=(), Error=()> {
-    let mut https = HttpsConnector::new(1).unwrap();
-    https.force_https(true);
-    let c = Client::builder().build::<_, Body>(https);
+    let ua = UserAgent::default();
 
-    get(&c, format!("{}{}", BASEURL, "test_suites").parse::<Uri>().unwrap())
+    let tests = get(&ua.client, ua.url("test_suites"))
         .and_then(|body: Chunk| {
             let res = serde_json::from_slice::<TestSuites>(&body)
                 .map_err(|e| Error::from(e));
             future::result(res)
         })
         .map_err(|e| eprintln!("Failed to get tests: {}", e))
-        .map(|tests: TestSuites| stream::iter_ok(tests.TestSuites))
-        .flatten_stream()
-        .for_each(|test| {
-            let sets = test.settings;
-            if let Some(s) = sets.iter().find(|s| s.key == "PUBLISH_HDD_1") {
+        .map(|tests: TestSuites| tests.TestSuites)
+        .wait().unwrap();
+
+    for test in tests {
+        let mut sets = &test.settings;
+        let mut update = false;
+        
+        let pub_hdd = sets.iter().find(|s| s.key == "PUBLISH_HDD_1");
+        match pub_hdd {
+            Some(s) if s.ends_with(".qcow2") => {
                 println!("Found PUBLISH_HDD_1 = {}", s.value);
-            }
-            let hdd1 = sets.iter().find(|s| s.key == "HDD_1");
-            if let Some(s) = sets.iter().find(|s| s.key == "START_AFTER_TEST").and(hdd1) {
+                sets.push(create_uefi_setting("PUBLISH_PFLASH_VARS", s.value));
+                update = true;
+            },
+            Some(s) => println!("Ignoring PUBLISH_HDD_1 = {}", s.value),
+            _ => (),
+        }
+
+        let hdd1 = sets.iter().find(|s| s.key == "HDD_1");
+        let parent = sets.iter().find(|s| s.key == "START_AFTER_TEST");
+        match (hdd1, parent) {
+            (Some(s), Some(_)) if s.ends_with(".qcow2") => {
                 println!("Found HDD_1 = {} and START_AFTER_TEST", s.value);
+                sets.push(create_uefi_setting("UEFI_PFLASH_VARS", s.value));
+                update = true;
+            },
+            (Some(s), _) => println!("Ignoring HDD_1 = {}", s.value),
+            _ => (),
+        }
+
+        if !update {
+            continue;
+        }
+        
+        println!("Update:\n\tUEFI_PFLASH_VARS = {}\n\t PUBLISH_PFLASH_VARS = {}",
+                 sets[-1].value, sets[-2].value);
+        println!("y/n? -> ");
+        if read_yn() {
+            let params = vec![("name", test.name),
+                              ("description", test.description)];
+            for s in sets {
+                params.push(s.key, s.value);
             }
-            future::ok(())
-        })
+            post(&ua.client, ua.url_query(format!("test_suites/{}", test.id), params))
+                .map_err(|e| eprintln!("Failed to post changes: {}", e))
+                .wait();
+        }
+    }
+
 }
 
 fn main() {
     rt::run(rt::lazy(run));
-    // For each test case
-    // 	If it has a publish HDD_1 generate a publish pflash vars
-    //  If it has a HDD_1 and a START_AFTER_TEST, generate a UEFI_PFLASH_VARS
-    //  present changes for sanity check
 }
