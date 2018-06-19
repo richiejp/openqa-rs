@@ -10,25 +10,24 @@ extern crate futures;
 extern crate failure;
 extern crate crypto;
 extern crate time;
-extern crate urlencoding;
 
-use http::uri::{Uri, Authority, Scheme, Parts, PathAndQuery};
+use std::io::{self, Write, Read};
+
+use bytes::{BufMut, BytesMut};
+use http::uri::Uri;
 use http::header::HeaderValue;
-use bytes::Bytes;
 use hyper::{Client, Body, Chunk};
 use hyper::client::HttpConnector;
 use hyper::rt::{self, Future, Stream};
 use hyper_tls::HttpsConnector;
-use futures::stream;
 use futures::future;
 use failure::Error;
 use crypto::hmac::Hmac;
 use crypto::sha1::Sha1;
-use crypto::mac::{Mac, MacResult};
+use crypto::mac::Mac;
 use time::get_time;
-use urlencoding as urlenc;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct Setting {
     pub key: String,
     pub value: String,
@@ -52,7 +51,7 @@ type MyClient = Client<HttpsConnector<HttpConnector>>;
 
 struct UserAgent {
     client: MyClient,
-    base_uri: Uri,
+    base_uri: BytesMut,
     key: String,
     secret: String,
 }
@@ -61,45 +60,69 @@ const KEY: &str = "1234567890ABCDEF";
 
 impl Default for UserAgent {
     fn default() -> UserAgent {
-        let mut https = HttpsConnector::new(1).unwrap();
+        let https = HttpsConnector::new(1).unwrap();
         let client = Client::builder().build::<_, Body>(https);
+        let base_uri = BytesMut::from(&b"http://rpws.suse.cz/api/v1/"[..]);
 
         UserAgent {
             client,
-            base_uri: "https://openqa.suse.de/api/v1/".parse().unwrap(),
+            base_uri,
             key: KEY.to_string(),
             secret: KEY.to_string(),
         }
     }
 }
 
-impl UserAgent {
-    fn url_parts(&self, path: &str) -> Parts {
-        let parts = Parts::from(self.base_uri.clone());
-        {
-            let bytes = parts.path_and_query.unwrap().into_bytes();
-            bytes.extend_from_slice(path.as_bytes());
+fn percent_encode(data: &[u8], out: &mut BytesMut) {
+    let xmap = b"0123456789ABCDEF";
+    out.reserve(data.len());
+    for b in data {
+        match *b {
+            b'0' ... b'9' | b'A' ... b'Z' | b'a' ... b'z' | b'-' | b'_' | b'.' => {
+                out.put(*b);
+            },
+            b' ' => out.put(b'+'),
+            _ => {
+                out.reserve(2);
+                out.put(b'%');
+                out.put(xmap[((b >> 4) & 0x0fu8) as usize]);
+                out.put(xmap[(b & 0x0fu8) as usize]);
+            },
         }
-        parts
+    }
+}
+
+impl UserAgent {
+    fn url_bytes(&self, path: &str) -> BytesMut {
+        let mut bytes = self.base_uri.clone();
+        bytes.extend_from_slice(path.as_bytes());
+        bytes
     }
 
     pub fn url(&self, path: &str) -> Uri {
-        Uri::from_parts(self.url_parts(path)).unwrap()
+        Uri::from_shared(self.url_bytes(path).into()).unwrap()
     }
 
-    pub fn url_query(&self, path: &str, pairs: Vec<(&str, &str)>) -> Uri {
-        let parts = self.url_parts(path);
-        {
-            let bytes = parts.path_and_query.unwrap().into_bytes();
-            bytes.extend_from_slice(&b"?"[..]);
-            for (k, v) in &pairs {
-                bytes.extend_from_slice(urlenc::encode(k).as_bytes());
-                bytes.extend_from_slice(&b"="[..]);
-                bytes.extend_from_slice(urlenc::encode(v).as_bytes());
+    pub fn url_query(&self, path: &str, pairs: Vec<(&str, &str, bool)>) -> Uri {
+        let mut bytes = self.url_bytes(path);
+        bytes.extend_from_slice(&b"?"[..]);
+        for (k, v, setting) in &pairs {
+            if *setting {
+                bytes.extend_from_slice(&b"settings%5B"[..]);
             }
+            percent_encode(k.as_bytes(), &mut bytes);
+            if *setting {
+                bytes.extend_from_slice(&b"%5D="[..]);
+            } else {
+                bytes.extend_from_slice(&b"="[..]);
+            }
+            percent_encode(v.as_bytes(), &mut bytes);
+            bytes.extend_from_slice(&b"&"[..]);
         }
+        let l = bytes.len() - 1;
+        bytes.truncate(l);
 
-        Uri::from_parts(parts).unwrap()
+        Uri::from_shared(bytes.into()).unwrap()
     }
 }
 
@@ -112,10 +135,10 @@ fn get(c: &MyClient, url: Uri) -> impl Future<Item=Chunk, Error=Error> {
 
 fn hex_str(bytes: &[u8]) -> String {
     let xmap: Vec<char> = "0123456789abcdef".chars().collect();
-    let h = String::default();
+    let mut h = String::default();
 
-    for (a, b) in bytes.iter().step_by(2).zip(bytes.iter().skip(1).step_by(2)) {
-        h.push(xmap[((a >> 4) & 0x0fu8) as usize]);
+    for b in bytes {
+        h.push(xmap[((b >> 4) & 0x0fu8) as usize]);
         h.push(xmap[(b & 0x0fu8) as usize]);
     }
 
@@ -123,20 +146,14 @@ fn hex_str(bytes: &[u8]) -> String {
 }
 
 fn hash(url: &Uri, t: &str) -> HeaderValue {
-    let mac = Hmac::new(Sha1::new(), KEY.as_bytes());
+    let mut mac = Hmac::new(Sha1::new(), KEY.as_bytes());
 
-    if let Some(s) = url.scheme_part() {
-        mac.input(s.as_str().as_bytes());
-        mac.input(b"://");
-    }
-    if let Some(a) = url.authority_part() {
-        mac.input(a.as_str().as_bytes());
-    }
     mac.input(url.path().as_bytes());
     if let Some(q) = url.query() {
         mac.input(b"?");
         mac.input(q.as_bytes());
     }
+    mac.input(t.as_bytes());
 
     HeaderValue::from_str(&hex_str(mac.result().code())).unwrap()
 }
@@ -144,13 +161,16 @@ fn hash(url: &Uri, t: &str) -> HeaderValue {
 fn post(c: &MyClient, url: Uri) -> impl Future<Item=Chunk, Error=Error> {
     let mut req = http::Request::new(Body::default());
     *req.method_mut() = http::Method::POST;
-    let hdrs = req.headers_mut();
-    hdrs.insert("Accept", HeaderValue::from_str("application/json").unwrap());
-    let t = format!("{}", get_time().sec);
-    hdrs.insert("X-API-Microtime", HeaderValue::from_str(&t).unwrap());
-    hdrs.insert("X-API-Key", HeaderValue::from_str(KEY).unwrap());
-    hdrs.insert("X-API-Hash", hash(&url, &t));
+    {
+        let hdrs = req.headers_mut();
+        hdrs.insert("Accept", HeaderValue::from_str("application/json").unwrap());
+        let t = format!("{}", get_time().sec);
+        hdrs.insert("X-API-Microtime", HeaderValue::from_str(&t).unwrap());
+        hdrs.insert("X-API-Key", HeaderValue::from_str(KEY).unwrap());
+        hdrs.insert("X-API-Hash", hash(&url, &t));
+    }
     *req.uri_mut() = url;
+    println!("POST {:#?}", req);
 
     c.request(req).and_then(|res| {
         println!("POST -> {}", res.status());
@@ -166,20 +186,27 @@ fn create_uefi_setting(key: &str, template: &str) -> Setting {
 }
 
 fn read_yn() -> bool {
-    use std::io::Read;
-
-    let buf: &mut [u8;1];
-    let mut sin = std::io::stdin().lock();
+    let buf = &mut [0u8;2];
+    let stdin = io::stdin();
+    let mut sin = stdin.lock();
 
     sin.read_exact(buf).unwrap();
-    println!("");
-    buf == b"y"
+    if &buf[0..1] == b"a" {
+        panic!("Aborted by user");
+    }
+    &buf[0..1] == b"y"
+}
+
+fn print_settings(settings: &[Setting]) {
+    for Setting { key: k, value: v } in settings {
+        println!("\t{:20}={}", k, v);
+    }
 }
 
 fn run() -> impl Future<Item=(), Error=()> {
     let ua = UserAgent::default();
 
-    let tests = get(&ua.client, ua.url("test_suites"))
+    let mut tests = get(&ua.client, ua.url("test_suites"))
         .and_then(|body: Chunk| {
             let res = serde_json::from_slice::<TestSuites>(&body)
                 .map_err(|e| Error::from(e));
@@ -189,58 +216,88 @@ fn run() -> impl Future<Item=(), Error=()> {
         .map(|tests: TestSuites| tests.TestSuites)
         .wait().unwrap();
 
-    let post_res = Vec::default();
-    for test in tests {
-        let mut sets = &test.settings;
-        let mut update = false;
+    for test in &mut tests {
+        println!("Inspecting {}", test.name);
+        let mut sets = &mut test.settings;
 
-        let pub_hdd = sets.iter().find(|s| s.key == "PUBLISH_HDD_1");
-        match pub_hdd {
+        let publish_vars = match sets.iter().find(|s| s.key == "PUBLISH_HDD_1") {
             Some(s) if s.value.ends_with(".qcow2") => {
                 println!("Found PUBLISH_HDD_1 = {}", s.value);
-                sets.push(create_uefi_setting("PUBLISH_PFLASH_VARS", &s.value));
-                update = true;
+                Some(create_uefi_setting("PUBLISH_PFLASH_VARS", &s.value))
             },
-            Some(s) => println!("Ignoring PUBLISH_HDD_1 = {}", s.value),
-            _ => (),
-        }
-
-        let hdd1 = sets.iter().find(|s| s.key == "HDD_1");
-        let parent = sets.iter().find(|s| s.key == "START_AFTER_TEST");
-        match (hdd1, parent) {
-            (Some(s), Some(_)) if s.value.ends_with(".qcow2") => {
-                println!("Found HDD_1 = {} and START_AFTER_TEST", s.value);
-                sets.push(create_uefi_setting("UEFI_PFLASH_VARS", &s.value));
-                update = true;
+            Some(s) => {
+                println!("Ignoring PUBLISH_HDD_1 = {}", s.value);
+                None
             },
-            (Some(s), _) => println!("Ignoring HDD_1 = {}", s.value),
-            _ => (),
-        }
+            _ => None,
+        };
 
-        if !update {
+        let uefi_vars = {
+            let hdd1 = sets.iter().find(|s| s.key == "HDD_1");
+            let parent = sets.iter().find(|s| s.key == "START_AFTER_TEST");
+            match (hdd1, parent) {
+                (Some(s), Some(_)) if s.value.ends_with(".qcow2") => {
+                    println!("Found HDD_1 = {} and START_AFTER_TEST", s.value);
+                    Some(create_uefi_setting("UEFI_PFLASH_VARS", &s.value))
+                },
+                (Some(s), _) => {
+                    println!("Ignoring HDD_1 = {}", s.value);
+                    None
+                },
+                _ => None,
+            }
+        };
+
+        if publish_vars.is_none() && uefi_vars.is_none() {
             continue;
         }
 
-        println!("Update:\n\tUEFI_PFLASH_VARS = {}\n\t PUBLISH_PFLASH_VARS = {}",
-                 sets[sets.len()-1].value, sets[sets.len()-2].value);
-        println!("y/n? -> ");
+        if let Some(s) = publish_vars { sets.push(s); }
+        if let Some(s) = uefi_vars { sets.push(s); }
+
+        println!("Update: ");
+        print_settings(&sets);
+        println!("y/n/a? -> ");
         if read_yn() {
-            let params: Vec<(&str, &str)> = vec![("name", &test.name),
-                                                 ("description", &test.description)];
+            let mut params: Vec<(&str, &str, bool)> = vec![
+                ("name", &test.name, false),
+                ("description", &test.description, false)
+            ];
             for s in sets {
-                params.push((&s.key, &s.value));
+                params.push((&s.key, &s.value, true));
             }
-            post_res.push(post(&ua.client, ua.url_query(&format!("test_suites/{}", test.id), params))
-                          .map_err(|e| eprintln!("Failed to post changes: {}", e)));
+            let res = post(&ua.client,
+                           ua.url_query(&format!("test_suites/{}", test.id), params)).wait();
+            match res {
+                Ok(resp) => {
+                    print!("POST Response:\n\t");
+                    io::stdout().write_all(&resp).unwrap();
+                    println!("");
+                },
+                Err(e) => eprintln!("Failed to post changes: {}", e),
+            }
         }
     }
-
-    stream::futures_unordered(post_res).for_each(|resp| {
-        println!("Posted:");
-        
-    })
+    future::ok(())
 }
 
 fn main() {
     rt::run(rt::lazy(run));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmac() {
+        let mut mac = Hmac::new(Sha1::new(), KEY.as_bytes());
+        let payload = "settings[foo]=bar";
+        mac.input(payload.as_bytes());
+        let res = mac.result();
+        let raw = res.code();
+        let hex = hex_str(&raw);
+        assert_eq!(raw.len() * 2, hex.len());
+        assert_eq!("f4d2e8996c1d68aff0892b248a92651c8d3e9a4c", &hex);
+    }
 }
