@@ -220,27 +220,40 @@ fn run() -> impl Future<Item=(), Error=()> {
         println!("Inspecting {}", test.name);
         let mut sets = &mut test.settings;
 
-        let publish_vars = match sets.iter().find(|s| s.key == "PUBLISH_HDD_1") {
-            Some(s) if s.value.ends_with(".qcow2") => {
-                println!("Found PUBLISH_HDD_1 = {}", s.value);
-                Some(create_uefi_setting("PUBLISH_PFLASH_VARS", &s.value))
-            },
-            Some(s) => {
-                println!("Ignoring PUBLISH_HDD_1 = {}", s.value);
-                None
-            },
-            _ => None,
+        let publish_vars = {
+            let pub_hdd = sets.iter().find(|s| s.key == "PUBLISH_HDD_1");
+            let pub_vars = sets.iter().find(|s| s.key == "PUBLISH_PFLASH_VARS");
+            match (pub_hdd, pub_vars) {
+                (_, Some(v)) => {
+                    println!("Found existing PUBLISH_PFLASH_VARS = {}", &v.value);
+                    None
+                },
+                (Some(s), _) if s.value.ends_with(".qcow2") => {
+                    println!("Found PUBLISH_HDD_1 = {}", s.value);
+                    Some(create_uefi_setting("PUBLISH_PFLASH_VARS", &s.value))
+                },
+                (Some(s), _) => {
+                    println!("Ignoring PUBLISH_HDD_1 = {}", s.value);
+                    None
+                },
+                _ => None,
+            }
         };
 
         let uefi_vars = {
             let hdd1 = sets.iter().find(|s| s.key == "HDD_1");
             let parent = sets.iter().find(|s| s.key == "START_AFTER_TEST");
-            match (hdd1, parent) {
-                (Some(s), Some(_)) if s.value.ends_with(".qcow2") => {
+            let vars = sets.iter().find(|s| s.key == "UEFI_PFLASH_VARS");
+            match (hdd1, parent, vars) {
+                (_, _, Some(v)) => {
+                    println!("Found existing UEFI_PFLASH_VARS = {}", &v.value);
+                    None
+                },
+                (Some(s), Some(_), _) if s.value.ends_with(".qcow2") => {
                     println!("Found HDD_1 = {} and START_AFTER_TEST", s.value);
                     Some(create_uefi_setting("UEFI_PFLASH_VARS", &s.value))
                 },
-                (Some(s), _) => {
+                (Some(s), _, _) => {
                     println!("Ignoring HDD_1 = {}", s.value);
                     None
                 },
