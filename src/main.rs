@@ -56,13 +56,14 @@ struct UserAgent {
     secret: String,
 }
 
-const KEY: &str = "1234567890ABCDEF";
+const KEY: &str = "";
+const SECRET: &str = "";
 
 impl Default for UserAgent {
     fn default() -> UserAgent {
         let https = HttpsConnector::new(1).unwrap();
         let client = Client::builder().build::<_, Body>(https);
-        let base_uri = BytesMut::from(&b"http://rpws.suse.cz/api/v1/"[..]);
+        let base_uri = BytesMut::from(&b"https://openqa.suse.de/api/v1/"[..]);
 
         UserAgent {
             client,
@@ -75,15 +76,14 @@ impl Default for UserAgent {
 
 fn percent_encode(data: &[u8], out: &mut BytesMut) {
     let xmap = b"0123456789ABCDEF";
-    out.reserve(data.len());
+    out.reserve(data.len() * 3);
     for b in data {
         match *b {
-            b'0' ... b'9' | b'A' ... b'Z' | b'a' ... b'z' | b'-' | b'_' | b'.' => {
+            b'0' ... b'9' | b'A' ... b'Z' | b'a' ... b'z' | b'-' | b'_' | b'.' | b'~' => {
                 out.put(*b);
             },
             b' ' => out.put(b'+'),
             _ => {
-                out.reserve(2);
                 out.put(b'%');
                 out.put(xmap[((b >> 4) & 0x0fu8) as usize]);
                 out.put(xmap[(b & 0x0fu8) as usize]);
@@ -146,7 +146,7 @@ fn hex_str(bytes: &[u8]) -> String {
 }
 
 fn hash(url: &Uri, t: &str) -> HeaderValue {
-    let mut mac = Hmac::new(Sha1::new(), KEY.as_bytes());
+    let mut mac = Hmac::new(Sha1::new(), SECRET.as_bytes());
 
     mac.input(url.path().as_bytes());
     if let Some(q) = url.query() {
@@ -181,7 +181,7 @@ fn post(c: &MyClient, url: Uri) -> impl Future<Item=Chunk, Error=Error> {
 fn create_uefi_setting(key: &str, template: &str) -> Setting {
     Setting {
         key: key.to_string(),
-        value: format!("{}-uefi.qcow2", template.trim_right_matches(".qcow2")),
+        value: format!("{}-uefi-vars.qcow2", template.trim_right_matches(".qcow2")),
     }
 }
 
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn hmac() {
-        let mut mac = Hmac::new(Sha1::new(), KEY.as_bytes());
+        let mut mac = Hmac::new(Sha1::new(), b"1234567890ABCDEF");
         let payload = "settings[foo]=bar";
         mac.input(payload.as_bytes());
         let res = mac.result();
@@ -312,5 +312,22 @@ mod tests {
         let hex = hex_str(&raw);
         assert_eq!(raw.len() * 2, hex.len());
         assert_eq!("f4d2e8996c1d68aff0892b248a92651c8d3e9a4c", &hex);
+    }
+
+    #[test]
+    fn percent_encode() {
+        let data = b"`~+_-;:\"?<>{}[]@*&^$#=|/`~+_-;:\"?<>{}[]@*&^$#=|/`~+_-;:\"?<>{}[]@*&^$#=|/'";
+        let escaped = "%60~%2B_-%3B%3A%22%3F%3C%3E%7B%7D%5B%5D%40%2A%26%5E%24%23%3D%7C%2F%60~%2B_-%3B%3A%22%3F%3C%3E%7B%7D%5B%5D%40%2A%26%5E%24%23%3D%7C%2F%60~%2B_-%3B%3A%22%3F%3C%3E%7B%7D%5B%5D%40%2A%26%5E%24%23%3D%7C%2F%27";
+        let mut buf = BytesMut::default();
+
+        super::percent_encode(data, &mut buf);
+        assert_eq!(escaped, &buf);
+
+        let data = b"0123456789`~!@#$%^&*()_-+={}[]|\\abcdefghijklmnopqrstuwvxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:;\"'<>,.?/ ";
+        let escaped = "0123456789%60~%21%40%23%24%25%5E%26%2A%28%29_-%2B%3D%7B%7D%5B%5D%7C%5CabcdefghijklmnopqrstuwvxyzABCDEFGHIJKLMNOPQRSTUVWXYZ%3A%3B%22%27%3C%3E%2C.%3F%2F+";
+        buf.clear();
+
+        super::percent_encode(data, &mut buf);
+        assert_eq!(escaped, &buf);
     }
 }
