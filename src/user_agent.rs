@@ -73,17 +73,15 @@ impl UserAgent {
             hdrs.insert("X-API-Hash", self.hash(&url, &t));
         }
         *req.uri_mut() = url;
-        println!("POST {:#?}", req);
+        debug!("POST {:#?}", req);
 
         self.client.request(req).and_then(|res| {
-            println!("POST -> {}", res.status());
             res.into_body().concat2()
         }).map_err(|e| Error::from(e))
     }
 
     pub fn get(&self, url: Uri) -> impl Future<Item=Chunk, Error=Error> {
         self.client.get(url).and_then(|res| {
-            println!("GET -> {}", res.status());
             res.into_body().concat2()
         }).map_err(|e| Error::from(e))
     }

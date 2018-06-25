@@ -6,12 +6,10 @@ extern crate failure;
 
 extern crate openqa;
 
-use std::io::{self, Write, Read};
+use std::io::{self, Read};
 
 use futures::future;
-use hyper::Chunk;
 use hyper::rt::{self, Future};
-use failure::Error;
 
 use openqa::*;
 
@@ -41,23 +39,17 @@ fn print_settings(settings: &[Setting]) {
 }
 
 fn run() -> impl Future<Item=(), Error=()> {
-    let ua = UserAgent::default();
+    let oqa = OpenQA::default();
 
-    let mut tests = ua.get(ua.url("test_suites"))
-        .and_then(|body: Chunk| {
-            let res = serde_json::from_slice::<TestSuites>(&body)
-                .map_err(|e| Error::from(e));
-            future::result(res)
-        })
-        .map_err(|e| eprintln!("Failed to get tests: {}", e))
-        .map(|tests: TestSuites| tests.TestSuites)
+    let mut tests = oqa.get_test_suites()
+        .map(|tests: TestSuites| tests.test_suites)
         .wait().unwrap();
 
     for test in &mut tests {
         println!("Inspecting {}", test.name);
-        let mut sets = &mut test.settings;
 
         let publish_vars = {
+            let mut sets = &mut test.settings;
             let pub_hdd = sets.iter().find(|s| s.key == "PUBLISH_HDD_1");
             let pub_vars = sets.iter().find(|s| s.key == "PUBLISH_PFLASH_VARS");
             match (pub_hdd, pub_vars) {
@@ -78,6 +70,7 @@ fn run() -> impl Future<Item=(), Error=()> {
         };
 
         let uefi_vars = {
+            let mut sets = &mut test.settings;
             let hdd1 = sets.iter().find(|s| s.key == "HDD_1");
             let parent = sets.iter().find(|s| s.key == "START_AFTER_TEST");
             let vars = sets.iter().find(|s| s.key == "UEFI_PFLASH_VARS");
@@ -102,31 +95,18 @@ fn run() -> impl Future<Item=(), Error=()> {
             continue;
         }
 
-        if let Some(s) = publish_vars { sets.push(s); }
-        if let Some(s) = uefi_vars { sets.push(s); }
+        if let Some(s) = publish_vars { test.settings.push(s); }
+        if let Some(s) = uefi_vars { test.settings.push(s); }
 
         println!("Update: ");
-        print_settings(&sets);
+        print_settings(&test.settings);
         println!("y/n/a? -> ");
         if read_yn() {
-            let mut params: Vec<(&str, &str, bool)> = vec![
-                ("name", &test.name, false),
-                ("description", &test.description, false)
-            ];
-            for s in sets {
-                params.push((&s.key, &s.value, true));
-            }
-
-            let res = ua.post(ua.url_query(&format!("test_suites/{}", test.id), params))
-                .wait();
+            let res = oqa.upd_test_suite(&test).wait().unwrap();
 
             match res {
-                Ok(resp) => {
-                    print!("POST Response:\n\t");
-                    io::stdout().write_all(&resp).unwrap();
-                    println!("");
-                },
-                Err(e) => eprintln!("Failed to post changes: {}", e),
+                UpdateResult::Ok(resp) => println!("POST Response -> {}", resp),
+                UpdateResult::Err(e) => eprintln!("Failed to update test: {}", e),
             }
         }
     }
