@@ -56,43 +56,74 @@ struct UserAgent {
     secret: String,
 }
 
-const KEY: &str = "";
-const SECRET: &str = "";
+const HOST: &str = "http://localhost";
+const KEY: &str = "1234567890ABCDEF";
+const SECRET: &str = "1234567890ABCDEF";
 
-impl Default for UserAgent {
-    fn default() -> UserAgent {
+const XMAP_U: &[u8] = b"0123456789ABCDEF";
+const XMAP_L: &[u8] = b"0123456789abcdef";
+
+impl UserAgent {
+    fn new<U, S, T>(host: U, key: S, secret: T) -> UserAgent
+    where
+        BytesMut: From<U>,
+        S: Into<String>,
+        T: Into<String>,
+    {
         let https = HttpsConnector::new(1).unwrap();
         let client = Client::builder().build::<_, Body>(https);
-        let base_uri = BytesMut::from(&b"https://openqa.suse.de/api/v1/"[..]);
+        let mut base_uri = BytesMut::from(host);
+        base_uri.extend_from_slice(&b"/api/v1/"[..]);
 
         UserAgent {
             client,
             base_uri,
-            key: KEY.to_string(),
-            secret: KEY.to_string(),
+            key: key.into(),
+            secret: secret.into(),
         }
+        
     }
-}
 
-fn percent_encode(data: &[u8], out: &mut BytesMut) {
-    let xmap = b"0123456789ABCDEF";
-    out.reserve(data.len() * 3);
-    for b in data {
-        match *b {
-            b'0' ... b'9' | b'A' ... b'Z' | b'a' ... b'z' | b'-' | b'_' | b'.' | b'~' => {
-                out.put(*b);
-            },
-            b' ' => out.put(b'+'),
-            _ => {
-                out.put(b'%');
-                out.put(xmap[((b >> 4) & 0x0fu8) as usize]);
-                out.put(xmap[(b & 0x0fu8) as usize]);
-            },
+    fn hash(&self, url: &Uri, time: &str) -> HeaderValue {
+        let mut mac = Hmac::new(Sha1::new(), self.secret.as_bytes());
+
+        mac.input(url.path().as_bytes());
+        if let Some(q) = url.query() {
+            mac.input(b"?");
+            mac.input(q.as_bytes());
         }
-    }
-}
+        mac.input(time.as_bytes());
 
-impl UserAgent {
+        HeaderValue::from_shared(hex_str(mac.result().code()).into()).unwrap()
+    }
+
+    fn post(&self, c: &MyClient, url: Uri) -> impl Future<Item=Chunk, Error=Error> {
+        let mut req = http::Request::new(Body::default());
+        *req.method_mut() = http::Method::POST;
+        {
+            let hdrs = req.headers_mut();
+            hdrs.insert("Accept", HeaderValue::from_str("application/json").unwrap());
+            let t = format!("{}", get_time().sec);
+            hdrs.insert("X-API-Microtime", HeaderValue::from_str(&t).unwrap());
+            hdrs.insert("X-API-Key", HeaderValue::from_str(&self.key).unwrap());
+            hdrs.insert("X-API-Hash", self.hash(&url, &t));
+        }
+        *req.uri_mut() = url;
+        println!("POST {:#?}", req);
+
+        c.request(req).and_then(|res| {
+            println!("POST -> {}", res.status());
+            res.into_body().concat2()
+        }).map_err(|e| Error::from(e))
+    }
+
+    fn get(&self, c: &MyClient, url: Uri) -> impl Future<Item=Chunk, Error=Error> {
+        c.get(url).and_then(|res| {
+            println!("GET -> {}", res.status());
+            res.into_body().concat2()
+        }).map_err(|e| Error::from(e))
+    }
+
     fn url_bytes(&self, path: &str) -> BytesMut {
         let mut bytes = self.base_uri.clone();
         bytes.extend_from_slice(path.as_bytes());
@@ -126,56 +157,38 @@ impl UserAgent {
     }
 }
 
-fn get(c: &MyClient, url: Uri) -> impl Future<Item=Chunk, Error=Error> {
-    c.get(url).and_then(|res| {
-        println!("GET -> {}", res.status());
-        res.into_body().concat2()
-    }).map_err(|e| Error::from(e))
+impl Default for UserAgent {
+    fn default() -> UserAgent {
+        UserAgent::new(HOST, KEY, SECRET)
+    }
 }
 
-fn hex_str(bytes: &[u8]) -> String {
-    let xmap: Vec<char> = "0123456789abcdef".chars().collect();
-    let mut h = String::default();
+fn percent_encode(data: &[u8], out: &mut BytesMut) {
+    out.reserve(data.len() * 3);
+    for b in data {
+        match *b {
+            b'0' ... b'9' | b'A' ... b'Z' | b'a' ... b'z' | b'-' | b'_' | b'.' | b'~' => {
+                out.put(*b);
+            },
+            b' ' => out.put(b'+'),
+            _ => {
+                out.put(b'%');
+                out.put(XMAP_U[((b >> 4) & 0x0fu8) as usize]);
+                out.put(XMAP_U[(b & 0x0fu8) as usize]);
+            },
+        }
+    }
+}
+
+fn hex_str(bytes: &[u8]) -> BytesMut {
+    let mut h = BytesMut::with_capacity(bytes.len() * 2);
 
     for b in bytes {
-        h.push(xmap[((b >> 4) & 0x0fu8) as usize]);
-        h.push(xmap[(b & 0x0fu8) as usize]);
+        h.put(XMAP_L[((b >> 4) & 0x0fu8) as usize]);
+        h.put(XMAP_L[(b & 0x0fu8) as usize]);
     }
 
     h
-}
-
-fn hash(url: &Uri, t: &str) -> HeaderValue {
-    let mut mac = Hmac::new(Sha1::new(), SECRET.as_bytes());
-
-    mac.input(url.path().as_bytes());
-    if let Some(q) = url.query() {
-        mac.input(b"?");
-        mac.input(q.as_bytes());
-    }
-    mac.input(t.as_bytes());
-
-    HeaderValue::from_str(&hex_str(mac.result().code())).unwrap()
-}
-
-fn post(c: &MyClient, url: Uri) -> impl Future<Item=Chunk, Error=Error> {
-    let mut req = http::Request::new(Body::default());
-    *req.method_mut() = http::Method::POST;
-    {
-        let hdrs = req.headers_mut();
-        hdrs.insert("Accept", HeaderValue::from_str("application/json").unwrap());
-        let t = format!("{}", get_time().sec);
-        hdrs.insert("X-API-Microtime", HeaderValue::from_str(&t).unwrap());
-        hdrs.insert("X-API-Key", HeaderValue::from_str(KEY).unwrap());
-        hdrs.insert("X-API-Hash", hash(&url, &t));
-    }
-    *req.uri_mut() = url;
-    println!("POST {:#?}", req);
-
-    c.request(req).and_then(|res| {
-        println!("POST -> {}", res.status());
-        res.into_body().concat2()
-    }).map_err(|e| Error::from(e))
 }
 
 fn create_uefi_setting(key: &str, template: &str) -> Setting {
@@ -206,7 +219,7 @@ fn print_settings(settings: &[Setting]) {
 fn run() -> impl Future<Item=(), Error=()> {
     let ua = UserAgent::default();
 
-    let mut tests = get(&ua.client, ua.url("test_suites"))
+    let mut tests = ua.get(&ua.client, ua.url("test_suites"))
         .and_then(|body: Chunk| {
             let res = serde_json::from_slice::<TestSuites>(&body)
                 .map_err(|e| Error::from(e));
@@ -279,8 +292,8 @@ fn run() -> impl Future<Item=(), Error=()> {
             for s in sets {
                 params.push((&s.key, &s.value, true));
             }
-            let res = post(&ua.client,
-                           ua.url_query(&format!("test_suites/{}", test.id), params)).wait();
+            let res = ua.post(&ua.client,
+                              ua.url_query(&format!("test_suites/{}", test.id), params)).wait();
             match res {
                 Ok(resp) => {
                     print!("POST Response:\n\t");
