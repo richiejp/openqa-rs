@@ -48,6 +48,22 @@ pub struct TestSuites {
 }
 
 #[derive(Deserialize)]
+pub struct Product {
+    id: i32,
+    arch: String,
+    distri: String,
+    flavor: String,
+    version: String,
+    settings: Vec<Setting>,
+}
+
+#[derive(Deserialize)]
+pub struct Products {
+    #[serde(rename = "Products")]
+    pub products: Vec<Product>,
+}
+
+#[derive(Deserialize)]
 pub enum UpdateResult {
     #[serde(rename = "result")]
     Ok(i32),
@@ -121,6 +137,15 @@ impl OpenQA {
     {
         self.ua.get(self.ua.url("test_suites")).and_then(|body: Chunk| {
             let res = serde_json::from_slice::<TestSuites>(&body)
+                .map_err(|e| Error::from(e));
+            future::result(res)
+        })
+    }
+
+    pub fn get_products(&self) -> impl Future<Item=Products, Error=Error>
+    {
+        self.ua.get(self.ua.url("products")).and_then(|body: Chunk| {
+            let res = serde_json::from_slice(&body)
                 .map_err(|e| Error::from(e));
             future::result(res)
         })
