@@ -96,20 +96,24 @@ impl UserAgent {
         Uri::from_shared(self.url_bytes(path).into()).unwrap()
     }
 
-    pub fn url_query(&self, path: &str, pairs: Vec<(&str, &str, bool)>) -> Uri {
+    pub fn url_query<K, V>(&self, path: &str, pairs: Vec<(K, V, bool)>) -> Uri
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>
+    {
         let mut bytes = self.url_bytes(path);
         bytes.extend_from_slice(&b"?"[..]);
         for (k, v, setting) in &pairs {
             if *setting {
                 bytes.extend_from_slice(&b"settings%5B"[..]);
             }
-            percent_encode(k.as_bytes(), &mut bytes);
+            percent_encode(k.as_ref(), &mut bytes);
             if *setting {
                 bytes.extend_from_slice(&b"%5D="[..]);
             } else {
                 bytes.extend_from_slice(&b"="[..]);
             }
-            percent_encode(v.as_bytes(), &mut bytes);
+            percent_encode(v.as_ref(), &mut bytes);
             bytes.extend_from_slice(&b"&"[..]);
         }
         let l = bytes.len() - 1;

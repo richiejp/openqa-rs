@@ -52,6 +52,21 @@ pub enum UpdateResult {
     Err(String),
 }
 
+#[derive(Deserialize)]
+pub enum CreateResult {
+    #[serde(rename = "id")]
+    Ok(i32),
+    #[serde(rename = "error")]
+    Err(String),
+}
+
+pub struct JobTemplate {
+    pub product_id: i32,
+    pub machine_id: i32,
+    pub group_id: i32,
+    pub test_suite_id: i32,
+}
+
 pub struct OpenQA {
     ua: UserAgent,
 }
@@ -89,7 +104,25 @@ impl OpenQA {
 
         self.ua.post(self.ua.url_query(&format!("test_suites/{}", test.id), params))
             .and_then(|body: Chunk| {
-                let res = serde_json::from_slice::<UpdateResult>(&body)
+                let res = serde_json::from_slice(&body)
+                    .map_err(|e| Error::from(e));
+                future::result(res)
+            })
+    }
+
+    pub fn new_job_template(&self, template: &JobTemplate)
+                            -> impl Future<Item=CreateResult, Error=Error>
+    {
+        let params = vec![
+            ("product_id", template.product_id.to_string(), false),
+            ("machine_id", template.machine_id.to_string(), false),
+            ("group_id", template.group_id.to_string(), false),
+            ("test_suite_id", template.test_suite_id.to_string(), false)
+        ];
+
+        self.ua.post(self.ua.url_query("job_templates", params))
+            .and_then(|body: Chunk| {
+                let res = serde_json::from_slice(&body)
                     .map_err(|e| Error::from(e));
                 future::result(res)
             })
