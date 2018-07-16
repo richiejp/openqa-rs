@@ -12,8 +12,11 @@ extern crate crypto;
 extern crate time;
 #[macro_use]
 extern crate log;
+extern crate toml;
 
 pub mod user_agent;
+
+use std::path::Path;
 
 use bytes::BytesMut;
 use futures::future;
@@ -67,6 +70,12 @@ pub struct JobTemplate {
     pub test_suite_id: i32,
 }
 
+#[derive(Deserialize)]
+struct AuthPair {
+    key: String,
+    secret: String,
+}
+
 pub struct OpenQA {
     ua: UserAgent,
 }
@@ -81,6 +90,31 @@ impl OpenQA {
         OpenQA {
             ua: UserAgent::new(host, key, secret),
         }
+    }
+
+    pub fn with_config<P, H>(file_path: P, host: H) -> Result<OpenQA, Error>
+    where
+        P: AsRef<Path>,
+        H: AsRef<str>
+    {
+        use std::io::Read;
+        use std::fs::File;
+
+        let file_path = file_path.as_ref();
+        let host = host.as_ref();
+        let mut file = File::open(file_path)?;
+        let mut conf = String::new();
+        file.read_to_string(&mut conf)?;
+
+        let conf = conf.parse::<toml::Value>()?;
+        let auth: AuthPair = conf.get(host).cloned().ok_or_else(|| {
+            failure::err_msg(format!("Host [{}] not found in config file {}",
+                                     host, file_path.display()))
+        })?.try_into()?;
+
+        Ok(OpenQA {
+            ua: UserAgent::new(host, auth.key, auth.secret),
+        })
     }
 
     pub fn get_test_suites(&self) -> impl Future<Item=TestSuites, Error=Error>
