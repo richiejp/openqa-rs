@@ -66,6 +66,20 @@ pub struct Products {
 }
 
 #[derive(Deserialize)]
+pub struct Machine {
+    pub id: i32,
+    pub name: String,
+    pub backend: String,
+    pub settings: Vec<Setting>,
+}
+
+#[derive(Deserialize)]
+pub struct Machines {
+    #[serde(rename = "Machines")]
+    pub machines: Vec<Machine>,
+}
+
+#[derive(Deserialize)]
 pub enum UpdateResult {
     #[serde(rename = "result")]
     Ok(i32),
