@@ -19,6 +19,7 @@ pub mod user_agent;
 
 use std::path::Path;
 
+use serde::de::DeserializeOwned;
 use bytes::BytesMut;
 use futures::future;
 use hyper::rt::Future;
@@ -131,10 +132,10 @@ impl OpenQA {
         let mut conf = String::new();
         file.read_to_string(&mut conf)?;
 
-        OpenQA::with_config(conf, host)
+        OpenQA::with_conf(conf, host)
     }
 
-    pub fn with_config<P, H>(conf: P, host: H) -> Result<OpenQA, Error>
+    pub fn with_conf<P, H>(conf: P, host: H) -> Result<OpenQA, Error>
     where
         P: AsRef<str>,
         H: AsRef<str>
@@ -158,22 +159,31 @@ impl OpenQA {
         })
     }
 
-    pub fn get_test_suites(&self) -> impl Future<Item=TestSuites, Error=Error>
+    pub fn get<U, T>(&self, url: U) -> impl Future<Item=T, Error=Error>
+    where
+        U: AsRef<str>,
+        T: DeserializeOwned,
     {
-        self.ua.get(self.ua.url("test_suites")).and_then(|body: Chunk| {
-            let res = serde_json::from_slice::<TestSuites>(&body)
+        self.ua.get(self.ua.url(url.as_ref())).and_then(|body: Chunk| {
+            let res = serde_json::from_slice(&body)
                 .map_err(|e| Error::from(e));
             future::result(res)
         })
     }
 
+    pub fn get_test_suites(&self) -> impl Future<Item=TestSuites, Error=Error>
+    {
+        self.get("test_suites")
+    }
+
     pub fn get_products(&self) -> impl Future<Item=Products, Error=Error>
     {
-        self.ua.get(self.ua.url("products")).and_then(|body: Chunk| {
-            let res = serde_json::from_slice(&body)
-                .map_err(|e| Error::from(e));
-            future::result(res)
-        })
+        self.get("products")
+    }
+
+    pub fn get_machines(&self) -> impl Future<Item=Machines, Error=Error>
+    {
+        self.get("machines")
     }
 
     pub fn upd_test_suite(&self, test: &TestSuite) -> impl Future<Item=UpdateResult, Error=Error>
