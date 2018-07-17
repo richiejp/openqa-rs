@@ -7,12 +7,13 @@ extern crate serde_json;
 #[macro_use]
 extern crate serde_derive;
 extern crate futures;
+#[macro_use]
 extern crate failure;
 extern crate crypto;
 extern crate time;
 #[macro_use]
 extern crate log;
-extern crate toml;
+extern crate ini;
 
 pub mod user_agent;
 
@@ -23,6 +24,7 @@ use futures::future;
 use hyper::rt::Future;
 use hyper::Chunk;
 use failure::Error;
+use ini::Ini;
 
 pub use user_agent::UserAgent;
 
@@ -49,12 +51,12 @@ pub struct TestSuites {
 
 #[derive(Deserialize)]
 pub struct Product {
-    id: i32,
-    arch: String,
-    distri: String,
-    flavor: String,
-    version: String,
-    settings: Vec<Setting>,
+    pub id: i32,
+    pub arch: String,
+    pub distri: String,
+    pub flavor: String,
+    pub version: String,
+    pub settings: Vec<Setting>,
 }
 
 #[derive(Deserialize)]
@@ -86,12 +88,6 @@ pub struct JobTemplate {
     pub test_suite_id: i32,
 }
 
-#[derive(Deserialize)]
-struct AuthPair {
-    key: String,
-    secret: String,
-}
-
 pub struct OpenQA {
     ua: UserAgent,
 }
@@ -108,7 +104,7 @@ impl OpenQA {
         }
     }
 
-    pub fn with_config<P, H>(file_path: P, host: H) -> Result<OpenQA, Error>
+    pub fn with_conf_file<P, H>(file_path: P, host: H) -> Result<OpenQA, Error>
     where
         P: AsRef<Path>,
         H: AsRef<str>
@@ -117,19 +113,34 @@ impl OpenQA {
         use std::fs::File;
 
         let file_path = file_path.as_ref();
-        let host = host.as_ref();
         let mut file = File::open(file_path)?;
         let mut conf = String::new();
         file.read_to_string(&mut conf)?;
 
-        let conf = conf.parse::<toml::Value>()?;
-        let auth: AuthPair = conf.get(host).cloned().ok_or_else(|| {
-            failure::err_msg(format!("Host [{}] not found in config file {}",
-                                     host, file_path.display()))
-        })?.try_into()?;
+        OpenQA::with_config(conf, host)
+    }
+
+    pub fn with_config<P, H>(conf: P, host: H) -> Result<OpenQA, Error>
+    where
+        P: AsRef<str>,
+        H: AsRef<str>
+    {
+        let host = host.as_ref();
+        let conf = Ini::load_from_str(conf.as_ref()).map_err(|e| {
+            format_err!("Error parsing config: {}", e)
+        })?;
+        let sec = conf.section(Some(host)).ok_or_else(|| {
+            format_err!("Host section [{}] not found in config", host)
+        })?;
+        let key = sec.get("key").cloned().ok_or_else(|| {
+            format_err!("'key' value not found in [{}]", host)
+        })?;
+        let secret = sec.get("secret").cloned().ok_or_else(|| {
+            format_err!("'secret' value ot found in [{}]", host)
+        })?;
 
         Ok(OpenQA {
-            ua: UserAgent::new(host, auth.key, auth.secret),
+            ua: UserAgent::new(format!("https://{}", host), key, secret),
         })
     }
 
