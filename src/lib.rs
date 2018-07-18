@@ -211,13 +211,21 @@ impl OpenQA {
             ("product_id", template.product_id.to_string(), false),
             ("machine_id", template.machine_id.to_string(), false),
             ("group_id", template.group_id.to_string(), false),
-            ("test_suite_id", template.test_suite_id.to_string(), false)
+            ("test_suite_id", template.test_suite_id.to_string(), false),
+            ("prio", 50.to_string(), false),
         ];
 
         self.ua.post(self.ua.url_query("job_templates", params))
             .and_then(|body: Chunk| {
                 let res = serde_json::from_slice(&body)
-                    .map_err(|e| Error::from(e));
+                    .map_err(|e| {
+                        if let Ok(b) = String::from_utf8(body.to_vec()) {
+                            format_err!("Deserializing response: {}, Message body: {}",
+                                        e, b)
+                        } else {
+                            format_err!("Deserializing response: {}", e)
+                        }
+                    });
                 future::result(res)
             })
     }

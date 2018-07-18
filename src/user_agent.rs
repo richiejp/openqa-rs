@@ -77,7 +77,7 @@ impl UserAgent {
 
         self.client.request(req).and_then(|res| {
             res.into_body().concat2()
-        }).map_err(|e| Error::from(e))
+        }).map_err(|e| format_err!("Posting: {}", e))
     }
 
     pub fn get(&self, url: Uri) -> impl Future<Item=Chunk, Error=Error> {
