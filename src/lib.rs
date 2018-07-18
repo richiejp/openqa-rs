@@ -127,7 +127,16 @@ impl OpenQA {
         use std::io::Read;
         use std::fs::File;
 
-        let file_path = file_path.as_ref();
+        let mut path_buf;
+        let file_path = match file_path.as_ref().strip_prefix("~") {
+            Ok(p) => {
+                path_buf = std::env::home_dir()
+                    .ok_or(format_err!("Can't get home dir"))?;
+                path_buf.push(p);
+                &path_buf
+            },
+            Err(_) => file_path.as_ref(),
+        };
         let mut file = File::open(file_path)?;
         let mut conf = String::new();
         file.read_to_string(&mut conf)?;
