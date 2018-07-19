@@ -17,3 +17,6 @@ rust-crypto = "0.2.36"
 time = "0.1.40"
 log = "^0.4"
 rust-ini = "^0.12"
+
+[dev-dependencies]
+env_logger = "^0.5"

@@ -3,6 +3,7 @@ extern crate serde;
 extern crate serde_json;
 extern crate futures;
 extern crate failure;
+extern crate env_logger;
 
 extern crate openqa;
 
@@ -39,7 +40,8 @@ fn print_settings(settings: &[Setting]) {
 }
 
 fn run() -> impl Future<Item=(), Error=()> {
-    let oqa = OpenQA::default();
+    let oqa = OpenQA::with_conf_file("~/.config/openqa/client.conf",
+                                     "openqa.opensuse.org").unwrap();
 
     let mut tests = oqa.get_test_suites()
         .map(|tests: TestSuites| tests.test_suites)
@@ -114,5 +116,6 @@ fn run() -> impl Future<Item=(), Error=()> {
 }
 
 fn main() {
+    env_logger::init();
     rt::run(rt::lazy(run));
 }
