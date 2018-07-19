@@ -41,6 +41,7 @@ pub struct TestSuite {
     pub description: String,
     pub id: i32,
     pub name: String,
+    #[serde(default)]
     pub settings: Vec<Setting>,
 }
 
@@ -57,6 +58,7 @@ pub struct Product {
     pub distri: String,
     pub flavor: String,
     pub version: String,
+    #[serde(default)]
     pub settings: Vec<Setting>,
 }
 
@@ -70,7 +72,9 @@ pub struct Products {
 pub struct Machine {
     pub id: i32,
     pub name: String,
+    #[serde(default)]
     pub backend: String,
+    #[serde(default)]
     pub settings: Vec<Setting>,
 }
 
@@ -101,6 +105,21 @@ pub struct JobTemplate {
     pub machine_id: i32,
     pub group_id: i32,
     pub test_suite_id: i32,
+}
+
+#[derive(Deserialize)]
+pub struct JobTemplateInfo {
+    pub group_name: String,
+    pub id: i32,
+    pub machine: Machine,
+    pub prio: i32,
+    pub test_suite: TestSuite,
+}
+
+#[derive(Deserialize)]
+pub struct JobTemplateInfos {
+    #[serde(rename = "JobTemplates")]
+    pub job_templates: Vec<JobTemplateInfo>, 
 }
 
 pub struct OpenQA {
@@ -175,7 +194,12 @@ impl OpenQA {
     {
         self.ua.get(self.ua.url(url.as_ref())).and_then(|body: Chunk| {
             let res = serde_json::from_slice(&body)
-                .map_err(|e| Error::from(e));
+                .map_err(|e| if let Ok(b) = String::from_utf8(body.to_vec()) {
+                            format_err!("Deserializing response: {}, Message body: {}",
+                                        e, b)
+                        } else {
+                            format_err!("Deserializing response: {}", e)
+                        });
             future::result(res)
         })
     }
@@ -195,7 +219,33 @@ impl OpenQA {
         self.get("machines")
     }
 
-    pub fn upd_test_suite(&self, test: &TestSuite) -> impl Future<Item=UpdateResult, Error=Error>
+    pub fn get_job_templates(&self) -> impl Future<Item=JobTemplateInfos, Error=Error>
+    {
+        self.get("job_templates")
+    }
+
+    pub fn post<U, T, K, V, P>(&self, url: U, pairs: P) -> impl Future<Item=T, Error=Error>
+    where
+        U: AsRef<str>,
+        T: DeserializeOwned,
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+        P: AsRef<[(K, V, bool)]>,
+    {
+        self.ua.post(self.ua.url_query(url.as_ref(), pairs)).and_then(|body: Chunk| {
+            let res = serde_json::from_slice(&body)
+                .map_err(|e| if let Ok(b) = String::from_utf8(body.to_vec()) {
+                            format_err!("Deserializing response: {}, Message body: {}",
+                                        e, b)
+                        } else {
+                            format_err!("Deserializing response: {}", e)
+                        });
+            future::result(res)
+        })
+    }
+
+    pub fn upd_test_suite<'a>(&self, test: &'a TestSuite)
+                              -> impl Future<Item=UpdateResult, Error=Error> + 'a
     {
         let mut params: Vec<(&str, &str, bool)> = vec![
             ("name", &test.name, false),
@@ -205,12 +255,7 @@ impl OpenQA {
             params.push((&s.key, &s.value, true));
         }
 
-        self.ua.post(self.ua.url_query(&format!("test_suites/{}", test.id), params))
-            .and_then(|body: Chunk| {
-                let res = serde_json::from_slice(&body)
-                    .map_err(|e| Error::from(e));
-                future::result(res)
-            })
+        self.post(format!("test_suites/{}", test.id), params)
     }
 
     pub fn new_job_template(&self, template: &JobTemplate)
@@ -224,19 +269,7 @@ impl OpenQA {
             ("prio", 50.to_string(), false),
         ];
 
-        self.ua.post(self.ua.url_query("job_templates", params))
-            .and_then(|body: Chunk| {
-                let res = serde_json::from_slice(&body)
-                    .map_err(|e| {
-                        if let Ok(b) = String::from_utf8(body.to_vec()) {
-                            format_err!("Deserializing response: {}, Message body: {}",
-                                        e, b)
-                        } else {
-                            format_err!("Deserializing response: {}", e)
-                        }
-                    });
-                future::result(res)
-            })
+        self.post("job_templates", params)
     }
 }
 
